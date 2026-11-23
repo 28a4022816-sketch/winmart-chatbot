@@ -18,7 +18,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Banner đầu trang chuẩn nhận diện WinMart */
     .winmart-hero {
         background: linear-gradient(135deg, #D71920 0%, #A30E14 100%);
         padding: 22px 28px;
@@ -42,7 +41,6 @@ st.markdown("""
         font-size: 15px !important;
         margin: 0 !important;
     }
-    /* Thẻ tổng kết hóa đơn nổi bật */
     div[data-testid="stMetric"] {
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(215, 25, 32, 0.35);
@@ -50,7 +48,6 @@ st.markdown("""
         border-radius: 12px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
     }
-    /* Nút bấm chính màu đỏ WinMart */
     div.stButton > button[kind="primary"] {
         background: linear-gradient(90deg, #D71920 0%, #B8141A 100%);
         border: none;
@@ -65,7 +62,6 @@ st.markdown("""
         transform: translateY(-1px);
         box-shadow: 0 6px 16px rgba(215, 25, 32, 0.45);
     }
-    /* Nút gợi ý giỏ hàng bo tròn mềm mại */
     div.stButton > button[kind="secondary"] {
         border-radius: 20px;
         border: 1px solid rgba(255, 210, 0, 0.45);
@@ -216,4 +212,71 @@ def load_promotions():
     json_path = os.path.join(BASE_DIR, "promotions.json")
     if os.path.exists(json_path):
         try:
-            with open(json_path, "r", encoding="utf-8")
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data and any(int(item.get("original_price", 0)) >= 1000 for item in data):
+                    return normalize_records(data)
+        except Exception:
+            pass
+
+    for fname in os.listdir(BASE_DIR):
+        if fname.startswith("~\$"):
+            continue
+        if fname.lower().endswith((".xlsx", ".xls", ".csv")):
+            full_path = os.path.join(BASE_DIR, fname)
+            records = smart_load_tabular(full_path)
+            if records:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(records, f, ensure_ascii=False, indent=2)
+                return records
+    return []
+
+# ==============================================================================
+# 3. XỬ LÝ NGÔN NGỮ TỰ NHIÊN & THUẬT TOÁN TỐI ƯU
+# ==============================================================================
+ABBREVIATIONS = {
+    "n giat": "nuoc giat",
+    "nc giat": "nuoc giat",
+    "nc mam": "nuoc mam",
+    "nc rua chen": "nuoc rua chen",
+    "nc rua bat": "nuoc rua chen",
+    "nc lau san": "nuoc lau san",
+    "nc tuong": "nuoc tuong",
+    "sua tuoi": "sua tuoi",
+    "dau an": "dau an",
+    "bot giat": "nuoc giat",
+    "kem danh rang": "kem danh rang"
+}
+
+def normalize_query_text(text: str) -> str:
+    norm = remove_accents(text)
+    for abbr, full in ABBREVIATIONS.items():
+        norm = re.sub(rf"\b{re.escape(abbr)}\b", full, norm)
+    return norm
+
+def parse_with_regex(user_query: str):
+    cleaned = normalize_query_text(user_query)
+    parts = re.split(r",|\bvà\b|\bva\b|\bvoi\b|\bvới\b|\+|\n", cleaned)
+    stop_words = [
+        "mua", "lay cho tui", "lay cho minh", "lay", "tim", "check gia",
+        "tu van", "giup minh", "giup tui", "cho minh", "cho tui", "toi muon",
+        "cai", "tui", "hop", "chai", "loc", "thung", "goi", "kg", "lit", "l"
+    ]
+    items = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        qty_match = re.search(r"\b(\d+)\s*(kg|g|l|lit|chai|tui|hop|loc|thung|goi|cai)?\b", part)
+        quantity = int(qty_match.group(1)) if qty_match else 1
+
+        item_name = re.sub(r"\b\d+\s*(kg|g|l|lit|chai|tui|hop|loc|thung|goi|cai)?\b", " ", part)
+        for sw in stop_words:
+            item_name = re.sub(rf"\b{re.escape(sw)}\b", " ", item_name)
+        item_name = re.sub(r"\s+", " ", item_name).strip()
+
+        if len(item_name) >= 2:
+            items.append({"item_name": item_name, "quantity": max(1, quantity)})
+    return items
+
+def parse_user_intent(user_query: str, api_key
