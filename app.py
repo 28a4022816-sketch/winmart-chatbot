@@ -1,610 +1,606 @@
-import streamlit as st
-import pandas as pd
-import json
 import os
 import re
+import json
+import math
 import unicodedata
-import google.generativeai as genai
+import urllib.parse
+import pandas as pd
+import streamlit as st
 
 # ==============================================================================
-# 1. CẤU HÌNH TRANG & GIAO DIỆN THƯƠNG HIỆU WINMART (CUSTOM CSS)
+# CẤU HÌNH TRANG & GIAO DIỆN THƯƠNG HIỆU WINMART (ĐỎ - VÀNG)
 # ==============================================================================
 st.set_page_config(
-    page_title="WinMart Smart Shopper | Trợ lý Mua sắm Thông minh",
+    page_title="WinMart Smart Shopper Agent",
     page_icon="🛒",
     layout="wide"
 )
 
 st.markdown("""
 <style>
-    /* Banner đầu trang chuẩn nhận diện WinMart */
-    .winmart-hero {
-        background: linear-gradient(135deg, #D71920 0%, #A30E14 100%);
-        padding: 22px 28px;
-        border-radius: 14px;
-        margin-bottom: 20px;
-        box-shadow: 0 6px 18px rgba(215, 25, 32, 0.25);
-        border: 1px solid rgba(255, 210, 0, 0.35);
-    }
-    .winmart-hero h1 {
-        color: #FFFFFF !important;
-        font-size: 28px !important;
-        font-weight: 800 !important;
-        margin: 0 0 6px 0 !important;
-        letter-spacing: 0.3px;
-    }
-    .winmart-hero span.brand-gold {
-        color: #FFD200;
-    }
-    .winmart-hero p {
-        color: rgba(255, 255, 255, 0.92) !important;
-        font-size: 15px !important;
-        margin: 0 !important;
-    }
-    /* Thẻ tổng kết hóa đơn nổi bật */
-    div[data-testid="stMetric"] {
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(215, 25, 32, 0.35);
-        padding: 14px 18px;
+    .winmart-banner {
+        background: linear-gradient(90deg, #D71920 0%, #B71218 100%);
+        padding: 18px 24px;
         border-radius: 12px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+        color: white;
+        margin-bottom: 18px;
+        border-bottom: 4px solid #FFD100;
     }
-    /* Nút bấm chính màu đỏ WinMart */
-    div.stButton > button[kind="primary"] {
-        background: linear-gradient(90deg, #D71920 0%, #B8141A 100%);
-        border: none;
-        border-radius: 10px;
-        padding: 10px 24px;
-        font-weight: 700;
-        font-size: 16px;
-        box-shadow: 0 4px 12px rgba(215, 25, 32, 0.3);
-        transition: all 0.2s ease;
+    .winmart-banner h1 {
+        color: #FFFFFF;
+        margin: 0;
+        font-size: 26px;
     }
-    div.stButton > button[kind="primary"]:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 6px 16px rgba(215, 25, 32, 0.45);
-    }
-    /* Nút gợi ý giỏ hàng bo tròn mềm mại */
-    div.stButton > button[kind="secondary"] {
-        border-radius: 20px;
-        border: 1px solid rgba(255, 210, 0, 0.45);
+    .winmart-banner p {
+        color: #FFF3CD;
+        margin: 6px 0 0 0;
         font-size: 14px;
-        padding: 6px 14px;
     }
 </style>
+<div class="winmart-banner">
+    <h1>🛒 WINMART SMART SHOPPER AGENT</h1>
+    <p>Trợ lý Mua sắm Thông minh & Săn Deal Tiết Kiệm • Tích hợp Ưu đãi Hội viên WiN</p>
+</div>
 """, unsafe_allow_html=True)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 # ==============================================================================
-# 2. NẠP & CHUẨN HÓA CƠ SỞ DỮ LIỆU KHUYẾN MÃI
+# MODULE 1: NẠP VÀ CHUẨN HÓA CƠ SỞ DỮ LIỆU KHUYẾN MÃI (105 SẢN PHẨM)
 # ==============================================================================
-def remove_accents(text: str) -> str:
-    if not text:
-        return ""
-    text = str(text).replace("đ", "d").replace("Đ", "D")
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
-
-def parse_price(val, allow_thousands_scale: bool = True) -> int:
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return 0
-    if isinstance(val, (int, float)):
-        v = int(round(val))
-        if allow_thousands_scale and 0 < v < 500:
-            return v * 1000
-        return v
-    s = str(val).strip()
-    if re.match(r"^\d+\.\d{1,2}$", s):
-        v = int(round(float(s)))
-        if allow_thousands_scale and 0 < v < 500:
-            return v * 1000
-        return v
-    digits = re.sub(r"[^\d]", "", s)
-    v = int(digits) if digits else 0
-    if allow_thousands_scale and 0 < v < 500:
-        return v * 1000
-    return v
-
-def get_col_value(lower_map: dict, candidate_keys: list, default=None):
-    for key in candidate_keys:
-        for col_k, col_v in lower_map.items():
-            if key == col_k or key in col_k:
-                if str(col_v).strip() not in ("", "0", "nan", "None", "NaT"):
-                    return col_v
-    return default
-
-def normalize_records(raw_records: list) -> list:
-    normalized = []
-    id_keys = ["id", "product_id", "ma_sp", "mã sp", "ma sp", "mã hàng", "ma hang"]
-    name_keys = [
-        "product_name", "ten_sp", "tên sp", "ten sp",
-        "tên sản phẩm", "ten san pham", "san_pham", "sản phẩm", "san pham",
-        "tên hàng", "ten hang", "mặt hàng", "mat hang", "item_name", "name"
-    ]
-    orig_keys = [
-        "original_price", "gia_goc", "giá gốc", "gia goc",
-        "niêm yết", "niem yet", "giá bán lẻ", "giá thường", "giá cũ", "price"
-    ]
-    sale_keys = [
-        "sale_price", "promo_price", "gia_km", "giá khuyến mãi", "gia khuyen mai",
-        "giá km", "gia km", "ưu đãi", "uu dai", "giá giảm", "sau giảm", "discount_price"
-    ]
-    win_keys = [
-        "win_member_price", "win_price", "gia_win", "giá hội viên", "gia hoi vien",
-        "giá win", "gia win", "thẻ win", "the win", "member"
-    ]
-
-    for idx, row in enumerate(raw_records, start=1):
-        lower_map = {str(k).strip().lower(): v for k, v in row.items()}
-
-        prod_id = get_col_value(lower_map, id_keys, f"WM-{len(normalized)+1:03d}")
-        prod_name = get_col_value(lower_map, name_keys, "")
-
-        if not prod_name or str(prod_name).strip().isdigit():
-            text_candidates = [
-                str(v).strip() for k, v in row.items()
-                if isinstance(v, str)
-                and len(str(v).strip()) >= 6
-                and not str(v).strip().isdigit()
-                and not re.match(r"^(WM|SP)[-_]?\d+$", str(v).strip(), re.I)
-            ]
-            if text_candidates:
-                prod_name = max(text_candidates, key=len)
-
-        orig_price = parse_price(get_col_value(lower_map, orig_keys, 0))
-        sale_price = parse_price(get_col_value(lower_map, sale_keys, 0))
-        win_price = parse_price(get_col_value(lower_map, win_keys, 0))
-
-        if orig_price == 0 and sale_price == 0 and win_price == 0:
-            numeric_prices = []
-            for k, v in row.items():
-                k_low = str(k).strip().lower()
-                if any(skip in k_low for skip in ["stt", "id", "mã", "ma ", "%", "tiết kiệm", "tiet kiem", "giảm %"]):
-                    continue
-                p_val = parse_price(v, allow_thousands_scale=False)
-                if p_val >= 1000:
-                    numeric_prices.append(p_val)
-            if numeric_prices:
-                numeric_prices.sort(reverse=True)
-                orig_price = numeric_prices[0]
-                sale_price = numeric_prices[1] if len(numeric_prices) >= 2 else orig_price
-                win_price = numeric_prices[2] if len(numeric_prices) >= 3 else sale_price
-
-        if orig_price == 0 and sale_price > 0:
-            orig_price = sale_price
-        if sale_price == 0:
-            sale_price = orig_price
-        if win_price == 0:
-            win_price = sale_price
-
-        prices_sorted = sorted([orig_price, sale_price, win_price], reverse=True)
-        orig_price, sale_price, win_price = prices_sorted[0], prices_sorted[1], prices_sorted[2]
-
-        clean_name = str(prod_name).strip()
-        if clean_name and clean_name.lower() not in ("nan", "none", "0") and orig_price >= 1000:
-            normalized.append({
-                "id": str(prod_id).strip(),
-                "product_name": clean_name,
-                "original_price": orig_price,
-                "sale_price": sale_price,
-                "win_member_price": win_price,
-            })
-    return normalized
-
-def smart_load_tabular(file_path: str) -> list:
-    if file_path.lower().endswith(".csv"):
-        try:
-            df = pd.read_csv(file_path, encoding="utf-8-sig")
-        except Exception:
-            df = pd.read_csv(file_path, encoding="latin1")
-    else:
-        df = pd.read_excel(file_path)
-
-    for i in range(min(6, len(df))):
-        row_text = " ".join([str(v).strip().lower() for v in df.iloc[i].values if pd.notna(v)])
-        if any(k in row_text for k in ["tên", "ten", "sản phẩm", "san pham", "giá", "gia", "product", "price"]):
-            df.columns = [str(v).strip() for v in df.iloc[i].values]
-            df = df.iloc[i + 1:].reset_index(drop=True)
+def smart_load_tabular(filepath):
+    raw_df = pd.read_excel(filepath, header=None)
+    header_row = 0
+    for idx in range(min(6, len(raw_df))):
+        row_str = " ".join(str(x).lower() for x in raw_df.iloc[idx].tolist())
+        if any(k in row_str for k in ["tên", "sản phẩm", "product", "giá", "price"]):
+            header_row = idx
             break
 
-    df = df.dropna(how="all").fillna(0)
-    return normalize_records(df.to_dict(orient="records"))
+    df = pd.read_excel(filepath, header=header_row)
+    catalog = []
+    for idx, row in df.iterrows():
+        name = ""
+        prices = []
+        for col in df.columns:
+            val = row[col]
+            if pd.isna(val):
+                continue
+            s_val = str(val).strip()
+            # Tìm tên sản phẩm (chuỗi chữ có độ dài >= 4)
+            if not name and re.search(r"[a-zA-ZÀ-ỹ]{3,}", s_val) and not s_val.replace(".", "").isdigit():
+                name = s_val
+            # Tìm các cột giá tiền >= 1000 VNĐ
+            num_str = re.sub(r"[^\d]", "", s_val)
+            if num_str:
+                num = int(num_str)
+                if 1000 <= num <= 50_000_000:
+                    prices.append(num)
 
+        if name and prices:
+            prices_sorted = sorted(list(set(prices)), reverse=True)
+            orig = prices_sorted[0]
+            sale = prices_sorted[1] if len(prices_sorted) >= 2 else orig
+            win = prices_sorted[2] if len(prices_sorted) >= 3 else sale
+            catalog.append({
+                "id": f"WM-{idx + 1:03d}",
+                "product_name": name,
+                "original_price": orig,
+                "sale_price": sale,
+                "win_member_price": win
+            })
+    return catalog
+
+
+@st.cache_data
 def load_promotions():
-    json_path = os.path.join(BASE_DIR, "promotions.json")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "promotions.json")
+    xlsx_path = os.path.join(base_dir, "winmart_promotions_105.xlsx")
+
+    catalog = []
     if os.path.exists(json_path):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if data and any(int(item.get("original_price", 0)) >= 1000 for item in data):
-                    return normalize_records(data)
+            if isinstance(data, list) and len(data) > 0:
+                # Kiểm tra xem có bị lỗi giá 0đ không
+                if any(int(item.get("original_price", 0)) > 0 for item in data):
+                    catalog = data
         except Exception:
-            pass
+            catalog = []
 
-    for fname in os.listdir(BASE_DIR):
-        if fname.startswith("~$"):
+    if not catalog and os.path.exists(xlsx_path):
+        catalog = smart_load_tabular(xlsx_path)
+        if catalog:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(catalog, f, ensure_ascii=False, indent=2)
+
+    # Chuẩn hóa bất biến logic giá: Giá niêm yết >= Giá KM tuần >= Giá Hội viên WiN > 0
+    cleaned_catalog = []
+    for i, item in enumerate(catalog):
+        orig = int(item.get("original_price", 0))
+        sale = int(item.get("sale_price", orig))
+        win = int(item.get("win_member_price", sale))
+        if orig <= 0:
             continue
-        if fname.lower().endswith((".xlsx", ".xls", ".csv")):
-            full_path = os.path.join(BASE_DIR, fname)
-            records = smart_load_tabular(full_path)
-            if records:
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(records, f, ensure_ascii=False, indent=2)
-                return records
-    return []
+        if sale <= 0 or sale > orig:
+            sale = orig
+        if win <= 0 or win > sale:
+            win = sale
+        cleaned_catalog.append({
+            "id": item.get("id", f"WM-{i + 1:03d}"),
+            "product_name": str(item.get("product_name", "")).strip(),
+            "original_price": orig,
+            "sale_price": sale,
+            "win_member_price": win
+        })
+    return cleaned_catalog
+
 
 # ==============================================================================
-# 3. XỬ LÝ NGÔN NGỮ TỰ NHIÊN & THUẬT TOÁN TỐI ƯU
+# MODULE 2: CHUẨN HÓA NGÔN NGỮ & BÓC TÁCH Ý ĐỊNH (GEMINI FLASH + OFFLINE REGEX)
 # ==============================================================================
 ABBREVIATIONS = {
     "n giat": "nuoc giat",
     "nc giat": "nuoc giat",
+    "bot giat": "nuoc giat",
     "nc mam": "nuoc mam",
+    "n mam": "nuoc mam",
     "nc rua chen": "nuoc rua chen",
     "nc rua bat": "nuoc rua chen",
-    "nc lau san": "nuoc lau san",
-    "nc tuong": "nuoc tuong",
+    "n rua chen": "nuoc rua chen",
+    "dau goi": "dau goi",
     "sua tuoi": "sua tuoi",
+    "sua chua": "sua chua",
     "dau an": "dau an",
-    "bot giat": "nuoc giat",
-    "kem danh rang": "kem danh rang"
+    "mi tom": "mi an lien",
+    "mi goi": "mi an lien",
+    "kem danh rang": "kem danh rang",
+    "kdr": "kem danh rang"
 }
 
-def normalize_query_text(text: str) -> str:
+STOP_WORDS = {
+    "mua", "lay", "cho", "tui", "toi", "minh", "em", "anh", "chi", "giup",
+    "can", "tim", "xem", "gia", "tinh", "tien", "hoa", "don", "di", "nhe", "a", "voi"
+}
+
+UNITS = r"(?:goi|chai|tui|hop|loc|thung|kg|g|lit|l|cai|chiec|lon|hu|bich|vỉ|vi|qua|trai|bo)"
+
+
+def remove_accents(text):
+    if not text:
+        return ""
+    text = str(text).replace("đ", "d").replace("Đ", "D")
+    nfkd = unicodedata.normalize("NFKD", text)
+    no_accent = "".join([c for c in nfkd if not unicodedata.combining(c)])
+    return no_accent.lower().strip()
+
+
+def normalize_query_text(text):
     norm = remove_accents(text)
+    norm = re.sub(r"[^\w\s,\.+]", " ", norm)
     for abbr, full in ABBREVIATIONS.items():
         norm = re.sub(rf"\b{re.escape(abbr)}\b", full, norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
     return norm
 
-def parse_with_regex(user_query: str):
-    cleaned = normalize_query_text(user_query)
-    parts = re.split(r",|\bvà\b|\bva\b|\bvoi\b|\bvới\b|\+|\n", cleaned)
-    stop_words = [
-        "mua", "lay cho tui", "lay cho minh", "lay", "tim", "check gia",
-        "tu van", "giup minh", "giup tui", "cho minh", "cho tui", "toi muon",
-        "cai", "tui", "hop", "chai", "loc", "thung", "goi", "kg", "lit", "l"
-    ]
-    items = []
-    for part in parts:
-        part = part.strip()
-        if not part:
+
+def parse_with_regex(query_text):
+    norm = normalize_query_text(query_text)
+    segments = re.split(r"[,;\+]|\bva\b|\bvoi\b", norm)
+    results = []
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
             continue
-        qty_match = re.search(r"\b(\d+)\s*(kg|g|l|lit|chai|tui|hop|loc|thung|goi|cai)?\b", part)
-        quantity = int(qty_match.group(1)) if qty_match else 1
+        # Tìm số lượng ở đầu cụm (VD: "2 goi gao st25" hoặc "2gao st25")
+        qty = 1
+        m = re.match(rf"^(\d+)\s*(?:{UNITS}\b)?\s*(.+)$", seg)
+        if m:
+            qty = max(1, int(m.group(1)))
+            item_part = m.group(2)
+        else:
+            item_part = re.sub(rf"^(?:{UNITS})\b\s*", "", seg)
 
-        item_name = re.sub(r"\b\d+\s*(kg|g|l|lit|chai|tui|hop|loc|thung|goi|cai)?\b", " ", part)
-        for sw in stop_words:
-            item_name = re.sub(rf"\b{re.escape(sw)}\b", " ", item_name)
-        item_name = re.sub(r"\s+", " ", item_name).strip()
+        # Loại bỏ từ dừng giao tiếp thừa
+        tokens = [t for t in item_part.split() if t not in STOP_WORDS]
+        clean_name = " ".join(tokens).strip()
+        if clean_name:
+            results.append({"item_name": clean_name, "quantity": qty})
+    return results
 
-        if len(item_name) >= 2:
-            items.append({"item_name": item_name, "quantity": max(1, quantity)})
-    return items
 
-def parse_user_intent(user_query: str, api_key: str):
+def parse_user_intent(query_text, api_key=""):
     if api_key and api_key.strip():
         try:
+            import google.generativeai as genai
             genai.configure(api_key=api_key.strip())
-            prompt = f"""
-            Bạn là trợ lý mua sắm của siêu thị WinMart. Trích xuất danh sách sản phẩm và số lượng từ câu sau.
-            Giải mã từ viết tắt tiếng Việt (vd: 'n giat' -> 'nước giặt', 'nc mam' -> 'nước mắm', 'nc rua chen' -> 'nước rửa chén').
-            Mặc định quantity = 1 nếu không nêu rõ.
-            Trả về đúng định dạng JSON mảng: [{{"item_name": "tên sản phẩm", "quantity": số_nguyên}}]
-            Câu yêu cầu: "{user_query}"
-            """
-            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
-                try:
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    response = model.generate_content(prompt)
-                    parsed = json.loads(response.text)
-                    if isinstance(parsed, list) and len(parsed) > 0:
-                        return parsed, f"Gemini AI ({model_name})"
-                except Exception:
-                    continue
+            model = genai.GenerativeModel(
+                "gemini-2.5-flash",
+                generation_config={"response_mime_type": "application/json"}
+            )
+            prompt = (
+                "Bạn là hệ thống trích xuất thực thể mua sắm siêu thị WinMart. "
+                "Hãy bóc tách danh sách sản phẩm và số lượng từ câu tiếng Việt sau "
+                "(tự giải mã từ viết tắt như nc rua chen -> nước rửa chén, n giat -> nước giặt). "
+                'Trả về duy nhất mảng JSON dạng [{"item_name": "tên sản phẩm", "quantity": 1}]. '
+                f"Câu khách hàng: {query_text}"
+            )
+            response = model.generate_content(prompt)
+            data = json.loads(response.text)
+            if isinstance(data, list) and len(data) > 0:
+                cleaned = []
+                for entry in data:
+                    if isinstance(entry, dict) and entry.get("item_name"):
+                        try:
+                            qty = max(1, int(float(entry.get("quantity", 1))))
+                        except (ValueError, TypeError):
+                            qty = 1
+                        cleaned.append({
+                            "item_name": str(entry["item_name"]).strip(),
+                            "quantity": qty
+                        })
+                if cleaned:
+                    return cleaned, "Gemini 2.5 Flash AI (Online)"
         except Exception:
-            pass
-    return parse_with_regex(user_query), "Bộ xử lý cục bộ tốc độ cao"
+            pass  # Tự động chuyển sang bộ lọc dự phòng Offline nếu sai key hoặc lỗi mạng
 
-def match_product(item_name: str, catalog: list):
-    q_norm = normalize_query_text(item_name)
+    return parse_with_regex(query_text), "Bộ lọc quy tắc cục bộ (Offline)"
+
+
+# ==============================================================================
+# MODULE 3: KHỚP MÃ SẢN PHẨM & CHỐT CHẶN CHỐNG ẢO GIÁC NGOÀI DANH MỤC
+# ==============================================================================
+def match_product(query_item, catalog, threshold=1.8):
+    q_norm = normalize_query_text(query_item)
     q_tokens = set(q_norm.split())
     if not q_tokens:
         return None
 
-    best_product = None
+    best_item = None
     best_score = 0.0
 
-    for prod in catalog:
-        p_name = str(prod.get("product_name", ""))
-        p_norm = remove_accents(p_name)
+    for item in catalog:
+        p_norm = remove_accents(item["product_name"])
         p_tokens = set(p_norm.split())
 
-        score = 0.0
-        if q_norm in p_norm:
-            score += 2.5
+        in_substr = 1.0 if q_norm in p_norm else 0.0
+        common_tokens = q_tokens.intersection(p_tokens)
+        overlap_ratio = len(common_tokens) / len(q_tokens)
+        long_token_bonus = sum(0.6 for t in common_tokens if len(t) >= 4)
 
-        overlap = q_tokens.intersection(p_tokens)
-        if overlap:
-            score += (len(overlap) / len(q_tokens)) * 2.0
-            for tok in overlap:
-                if len(tok) >= 4:
-                    score += 0.6
-
+        score = 2.5 * in_substr + 2.0 * overlap_ratio + long_token_bonus
         if score > best_score:
             best_score = score
-            best_product = prod
+            best_item = item
 
-    if best_score >= 1.8:
-        return best_product
+    if best_score >= threshold:
+        return best_item
     return None
 
-def optimize_basket_knapsack(catalog: list, budget: int, is_win_member: bool):
-    candidates = []
-    for p in catalog:
-        orig = int(p["original_price"])
-        final = int(p["win_member_price"]) if (is_win_member and p["win_member_price"] < p["sale_price"]) else int(p["sale_price"])
-        saving = max(0, orig - final)
-        if 0 < final <= budget and saving > 0:
-            candidates.append({
-                **p,
-                "final_price": final,
-                "saving": saving,
-                "weight": max(1, final // 1000)
-            })
-
-    W = budget // 1000
-    n = len(candidates)
-    if n == 0 or W <= 0:
-        return []
-
-    dp = [[0.0] * (W + 1) for _ in range(n + 1)]
-    for i in range(1, n + 1):
-        w_i = candidates[i - 1]["weight"]
-        v_i = candidates[i - 1]["saving"] + 0.001 * candidates[i - 1]["final_price"]
-        for w in range(W + 1):
-            dp[i][w] = dp[i - 1][w]
-            if w_i <= w and dp[i - 1][w - w_i] + v_i > dp[i][w]:
-                dp[i][w] = dp[i - 1][w - w_i] + v_i
-
-    selected = []
-    w = W
-    for i in range(n, 0, -1):
-        if dp[i][w] != dp[i - 1][w]:
-            item = candidates[i - 1]
-            selected.append(item)
-            w -= item["weight"]
-
-    return selected[::-1]
 
 # ==============================================================================
-# 4. GIAO DIỆN NGƯỜI DÙNG CHÍNH (CUSTOMER-FACING UI)
+# MODULE 4: THUẬT TOÁN QUY HOẠCH ĐỘNG 0/1 KNAPSACK TỐI ƯU GIỎ HÀNG THEO NGÂN SÁCH
+# ==============================================================================
+def optimize_basket_knapsack(catalog, budget, is_win_member=True):
+    if not catalog or budget <= 0:
+        return []
+
+    step = 100  # Chuẩn hóa bước 100đ để giữ chính xác giá lẻ siêu thị (19.900đ, 45.500đ)
+    W = int(budget // step)
+    if W <= 0:
+        return []
+
+    valid_items = []
+    for item in catalog:
+        orig = int(item["original_price"])
+        sale = int(item["sale_price"])
+        win = int(item["win_member_price"])
+        final = win if (is_win_member and win < sale) else sale
+        saving = max(0, orig - final)
+        weight = math.ceil(final / step)
+
+        if 0 < final <= budget and weight <= W:
+            value = saving + 0.001 * final
+            valid_items.append((item, final, saving, weight, value))
+
+    n = len(valid_items)
+    if n == 0:
+        return []
+
+    dp = [0.0] * (W + 1)
+    keep = [[False] * (W + 1) for _ in range(n)]
+
+    for i in range(n):
+        _, _, _, w, v = valid_items[i]
+        for cap in range(W, w - 1, -1):
+            if dp[cap - w] + v > dp[cap]:
+                dp[cap] = dp[cap - w] + v
+                keep[i][cap] = True
+
+    best_cap = max(range(W + 1), key=lambda c: dp[c])
+    selected = []
+    curr_cap = best_cap
+    for i in range(n - 1, -1, -1):
+        if keep[i][curr_cap]:
+            item, final, saving, w, _ = valid_items[i]
+            promo_label = (
+                "Ưu đãi Hội viên WiN"
+                if (is_win_member and item["win_member_price"] == final and final < item["sale_price"])
+                else ("Khuyến mãi tuần" if final < item["original_price"] else "Giá niêm yết")
+            )
+            selected.append({
+                "Mã SKU": item["id"],
+                "Tên sản phẩm": item["product_name"],
+                "Chương trình": promo_label,
+                "Giá niêm yết (đ)": item["original_price"],
+                "Giá ưu đãi (đ)": final,
+                "Tiết kiệm (đ)": saving,
+                "Link mua hàng": f"https://winmart.vn/search?q={urllib.parse.quote(item['product_name'])}"
+            })
+            curr_cap -= w
+
+    selected.reverse()
+    return selected
+
+
+# ==============================================================================
+# GIAO DIỆN CHÍNH & THANH ĐIỀU HƯỚNG BÊN TRÁI
 # ==============================================================================
 catalog = load_promotions()
 
 with st.sidebar:
-    st.markdown(
-        """
-        <div style="background: linear-gradient(135deg, #D71920 0%, #9E0B10 100%);
-                    padding: 16px; border-radius: 12px; margin-bottom: 16px; text-align: center;
-                    border: 1px solid rgba(255, 210, 0, 0.4);">
-            <span style="color: #FFD200; font-weight: 900; font-size: 26px; letter-spacing: 0.5px;">WinMart</span>
-            <span style="color: #FFFFFF; font-weight: 600; font-size: 13px; display: block; margin-top: 2px;">
-                TRỢ LÝ SĂN DEAL & MUA SẮM
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown("### 💳 Quyền lợi Hội viên")
-    is_win_member = st.toggle("Áp dụng thẻ Hội viên WiN", value=True, help="Bật để hưởng ưu đãi giảm giá độc quyền dành cho Hội viên WiN.")
+    st.header("⚙️ Thiết lập Mua sắm")
+    is_win_member = st.toggle("💳 Áp dụng thẻ Hội viên WiN", value=True)
     if is_win_member:
-        st.success("✨ **Đang áp dụng giá Hội viên WiN** (Tiết kiệm tối đa)")
+        st.success("Đang bật giá độc quyền Hội viên WiN!")
     else:
-        st.warning("🏷️ **Đang áp dụng giá Khuyến mãi tuần** (Khách thường)")
+        st.info("Đang tính theo giá khuyến mãi thường.")
 
     st.divider()
-    st.markdown("### 🏪 Thông tin Cửa hàng")
-    st.caption(f"🟢 Trạng thái hệ thống: **Sẵn sàng**")
-    st.caption(f"📦 Danh mục ưu đãi tuần này: **{len(catalog)} sản phẩm**")
-    st.caption("📍 Áp dụng toàn hệ thống WinMart / WinMart+")
-
-    st.divider()
-    with st.expander("⚙️ Cài đặt nâng cao (AI Engine)"):
+    with st.expander("🔑 Cấu hình Gemini API (Tùy chọn)"):
         api_key = st.text_input(
-            "Gemini API Key (Tùy chọn)",
+            "Nhập GEMINI_API_KEY:",
             type="password",
-            placeholder="Nhập khóa nếu muốn dùng Gemini Cloud...",
-            help="Có thể để trống. Hệ thống tích hợp sẵn bộ phân tích ngôn ngữ cục bộ hoạt động ngay cả khi không có API Key."
+            placeholder="AIzaSy...",
+            help="Không bắt buộc. Nếu bỏ trống hoặc sai key, hệ thống tự chạy bộ lọc cục bộ siêu tốc."
         )
-        if api_key.strip():
-            st.caption("☁️ Chế độ: **Gemini Flash Cloud**")
-        else:
-            st.caption("⚡ Chế độ: **Local Smart Parser (Không cần Key)**")
 
-# Banner chào mừng phía trên cùng
-st.markdown(
-    """
-    <div class="winmart-hero">
-        <h1>🛒 <span class="brand-gold">WinMart</span> Smart Shopper Assistant</h1>
-        <p>Nhập danh sách đi chợ bằng ngôn ngữ tự nhiên — Tự động săn deal tốt nhất & tính hóa đơn tiết kiệm tức thì.</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    st.divider()
+    st.caption(f"📦 Kho dữ liệu hiện có: **{len(catalog)}** mặt hàng WinMart.")
 
 if not catalog:
-    st.error(f"⚠️ Không tìm thấy dữ liệu sản phẩm trong thư mục `{BASE_DIR}`.")
+    st.error("⚠️ Không tìm thấy tệp dữ liệu `promotions.json` hoặc `winmart_promotions_105.xlsx` trong cùng thư mục với `app.py`.")
     st.stop()
 
-if "shopping_input" not in st.session_state:
-    st.session_state.shopping_input = "Mua 1kg thịt ba rọi, 1 túi n giat ariel, 1 lốc sữa TH và 1 chai nước mắm"
-
+# ==============================================================================
+# 3 PHÂN HỆ CHỨC NĂNG CHÍNH (TABS)
+# ==============================================================================
 tab1, tab2, tab3 = st.tabs([
     "🛍️ Lên Giỏ Hàng & Tính Tiền",
     "🎯 Gợi Ý Giỏ Hàng Theo Ngân Sách",
-    "🏷️ Bảng Giá Khuyến Mãi Tuần Này"
+    "📋 Bảng Giá Khuyến Mãi Tuần Này"
 ])
 
 # ------------------------------------------------------------------------------
-# TAB 1: TRỢ LÝ MUA SẮM DÀNH CHO KHÁCH HÀNG
+# TAB 1: LÊN GIỎ HÀNG & TÍNH TIỀN TỰ ĐỘNG
 # ------------------------------------------------------------------------------
 with tab1:
-    st.caption("💡 **Gợi ý đi chợ nhanh:** Chọn nhanh một giỏ hàng mẫu hoặc tự nhập danh sách của bạn bên dưới")
-    gcol1, gcol2, gcol3 = st.columns(3)
-    if gcol1.button("🥩 Bữa cơm gia đình", use_container_width=True):
-        st.session_state.shopping_input = "Mua 1kg thịt ba rọi, 1 túi n giat ariel, 1 lốc sữa TH và 1 chai nước mắm"
-    if gcol2.button("🌾 Đi chợ cuối tuần", use_container_width=True):
-        st.session_state.shopping_input = "lay cho tui 2 goi gao st25, 1 dau an tuong an voi 2 chai nc rua chen sunlight"
-    if gcol3.button("🍳 Đồ bếp thiết yếu", use_container_width=True):
-        st.session_state.shopping_input = "Mua 1 chai dầu ăn Meizan, 2 hộp sữa chua và 1 túi nước giặt OMO"
+    st.subheader("Nhập danh sách sản phẩm bạn cần mua bằng tiếng Việt tự nhiên")
+    st.caption("Hỗ trợ cả câu không dấu, thiếu dấu phẩy và từ viết tắt (ví dụ: n giat, nc mam, nc rua chen...)")
+
+    if "user_query" not in st.session_state:
+        st.session_state["user_query"] = ""
+
+    st.write("**💡 Gợi ý giỏ hàng nhanh (bấm để điền mẫu):**")
+    col_b1, col_b2, col_b3 = st.columns(3)
+    with col_b1:
+        if st.button("🍚 Bữa cơm gia đình", use_container_width=True):
+            st.session_state["user_query"] = "1 túi gạo ST25, 1 chai nước mắm Nam Ngư, 1 dầu ăn Tường An, 2 hộp sữa tươi Vinamilk"
+            st.rerun()
+    with col_b2:
+        if st.button("🛒 Đi chợ cuối tuần (Không dấu)", use_container_width=True):
+            st.session_state["user_query"] = "lay cho tui 2 goi gao st25, 1 dau an tuong an voi 2 chai nc rua chen sunlight"
+            st.rerun()
+    with col_b3:
+        if st.button("🧴 Đồ bếp & Giặt giũ thiết yếu", use_container_width=True):
+            st.session_state["user_query"] = "1 túi n giat Ariel, 2 chai nc rua chen, 1 kem danh rang Colgate"
+            st.rerun()
 
     user_query = st.text_area(
-        "📝 Bạn cần mua gì hôm nay? (Hỗ trợ gõ tự nhiên, không dấu hoặc viết tắt):",
-        value=st.session_state.shopping_input,
+        "Danh sách cần mua của bạn:",
+        key="user_query",
         height=95,
-        placeholder="Ví dụ: Mua 2kg gạo ST25, 1 chai dầu ăn, 1 lốc sữa tươi TH..."
+        placeholder="Ví dụ: Mua cho mình 2 gói gạo ST25, 1 túi nước giặt Ariel và 2 chai nước rửa chén Sunlight..."
     )
 
-    if st.button("✨ Tính Hóa Đơn & Săn Deal Tốt Nhất", type="primary"):
-        if not user_query.strip():
-            st.warning("Bạn vui lòng nhập ít nhất 1 sản phẩm cần mua nhé!")
+    if st.button("🧾 Tính Hóa Đơn & Săn Deal Tốt Nhất", type="primary"):
+        if not user_query or not user_query.strip():
+            st.warning("⚠️ Bạn chưa nhập danh sách sản phẩm cần mua. Hãy gõ tên món hoặc bấm một nút gợi ý ở trên nhé!")
         else:
-            with st.spinner("Đang tìm sản phẩm và áp dụng ưu đãi tốt nhất cho bạn..."):
-                parsed_items, _ = parse_user_intent(user_query, api_key)
+            parsed_entities, engine_used = parse_user_intent(user_query, api_key)
+            if not parsed_entities:
+                st.warning("⚠️ Hệ thống chưa nhận diện được tên sản phẩm nào từ câu nhập. Bạn thử viết rõ tên mặt hàng hơn nhé!")
+            else:
+                matched_rows = []
+                not_found_items = []
 
-            invoice_rows = []
-            chart_rows = []
-            not_found_items = []
-            total_orig = 0
-            total_final = 0
+                for ent in parsed_entities:
+                    raw_name = ent["item_name"]
+                    qty = ent["quantity"]
+                    product = match_product(raw_name, catalog)
 
-            for entry in parsed_items:
-                raw_name = entry.get("item_name", "")
-                qty = max(1, int(entry.get("quantity", 1)))
-                matched = match_product(raw_name, catalog)
-
-                if matched:
-                    orig_price = int(matched["original_price"])
-                    sale_price = int(matched["sale_price"])
-                    win_price = int(matched["win_member_price"])
-
-                    if is_win_member and win_price < sale_price:
-                        unit_final = win_price
-                        promo_label = "💳 Ưu đãi Hội viên WiN"
+                    if product is None:
+                        not_found_items.append(f"{raw_name} (SL: {qty})")
                     else:
-                        unit_final = sale_price
-                        promo_label = "🏷️ Khuyến mãi tuần"
+                        orig = product["original_price"]
+                        sale = product["sale_price"]
+                        win = product["win_member_price"]
+                        unit_final = win if (is_win_member and win < sale) else sale
+                        promo_tag = (
+                            "Ưu đãi Hội viên WiN"
+                            if (is_win_member and win < sale)
+                            else ("Khuyến mãi tuần" if sale < orig else "Giá niêm yết")
+                        )
+                        row_orig = orig * qty
+                        row_final = unit_final * qty
+                        row_save = max(0, row_orig - row_final)
 
-                    line_orig = orig_price * qty
-                    line_final = unit_final * qty
-                    line_saved = line_orig - line_final
+                        matched_rows.append({
+                            "Mã SKU": product["id"],
+                            "Tên sản phẩm": product["product_name"],
+                            "SL": qty,
+                            "Chương trình": promo_tag,
+                            "Đơn giá gốc (đ)": orig,
+                            "Đơn giá ưu đãi (đ)": unit_final,
+                            "Thành tiền (đ)": row_final,
+                            "Tiết kiệm (đ)": row_save,
+                            "Link mua hàng": f"https://winmart.vn/search?q={urllib.parse.quote(product['product_name'])}"
+                        })
 
-                    total_orig += line_orig
-                    total_final += line_final
+                st.caption(f"⚙️ Động cơ xử lý ngôn ngữ: **{engine_used}**")
 
-                    invoice_rows.append({
-                        "Mã SP": matched.get("id", "WM-SP"),
-                        "Sản phẩm WinMart": matched["product_name"],
-                        "SL": qty,
-                        "Giá niêm yết": f"{line_orig:,.0f} đ",
-                        "Giá ưu đãi": f"{line_final:,.0f} đ",
-                        "Tiết kiệm": f"{line_saved:,.0f} đ",
-                        "Chương trình áp dụng": promo_label
-                    })
-                    chart_rows.append({
-                        "Sản phẩm": matched["product_name"][:24],
-                        "Giá niêm yết (VNĐ)": line_orig,
-                        "Giá thanh toán (VNĐ)": line_final
-                    })
+                if not matched_rows:
+                    st.warning("⚠️ Không có mặt hàng nào trong yêu cầu của bạn thuộc danh mục khuyến mãi tuần này.")
                 else:
-                    not_found_items.append(raw_name)
+                    df_bill = pd.DataFrame(matched_rows)
+                    total_orig = int(df_bill["Đơn giá gốc (đ)"].mul(df_bill["SL"]).sum())
+                    total_pay = int(df_bill["Thành tiền (đ)"].sum())
+                    total_save = max(0, total_orig - total_pay)
+                    save_pct = (total_save / total_orig * 100) if total_orig > 0 else 0.0
 
-            if invoice_rows:
-                st.markdown("### 🧾 Chi Tiết Hóa Đơn Của Bạn")
-                df_invoice = pd.DataFrame(invoice_rows)
-                st.dataframe(df_invoice, use_container_width=True, hide_index=True)
+                    st.markdown("### 📊 Bảng Chi Tiết Hóa Đơn Ưu Đãi")
+                    st.dataframe(
+                        df_bill,
+                        column_config={
+                            "Đơn giá gốc (đ)": st.column_config.NumberColumn(format="%d đ"),
+                            "Đơn giá ưu đãi (đ)": st.column_config.NumberColumn(format="%d đ"),
+                            "Thành tiền (đ)": st.column_config.NumberColumn(format="%d đ"),
+                            "Tiết kiệm (đ)": st.column_config.NumberColumn(format="%d đ"),
+                            "Link mua hàng": st.column_config.LinkColumn(
+                                "Đặt mua",
+                                help="Bấm để mở trang tìm sản phẩm trên WinMart.vn",
+                                display_text="🛒 Mua ngay"
+                            )
+                        },
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
-                total_saved = total_orig - total_final
-                save_pct = (total_saved / total_orig * 100) if total_orig > 0 else 0
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Tổng giá niêm yết gốc", f"{total_orig:,.0f} đ")
+                    k2.metric("Tổng thanh toán ưu đãi", f"{total_pay:,.0f} đ", delta=f"-{save_pct:.1f}%")
+                    k3.metric("🎉 Bạn đã tiết kiệm được", f"{total_save:,.0f} đ")
 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("💰 Tổng giá gốc", f"{total_orig:,.0f} VNĐ")
-                col2.metric("✅ Tổng thanh toán", f"{total_final:,.0f} VNĐ", delta=f"-{total_saved:,.0f} VNĐ")
-                col3.metric("🎉 Bạn đã tiết kiệm", f"{total_saved:,.0f} VNĐ", delta=f"Giảm {save_pct:.1f}%")
+                    st.markdown("### 📈 Biểu Đồ So Sánh Chi Phí Trước & Sau Ưu Đãi")
+                    chart_df = pd.DataFrame({
+                        "Sản phẩm": df_bill["Tên sản phẩm"],
+                        "Giá niêm yết gốc": df_bill["Đơn giá gốc (đ)"] * df_bill["SL"],
+                        "Giá sau ưu đãi": df_bill["Thành tiền (đ)"]
+                    }).set_index("Sản phẩm")
+                    st.bar_chart(chart_df)
 
-                with st.expander("📊 Xem biểu đồ so sánh giá trước & sau ưu đãi", expanded=True):
-                    df_chart = pd.DataFrame(chart_rows).set_index("Sản phẩm")
-                    st.bar_chart(df_chart)
+                    csv_bytes = df_bill.drop(columns=["Link mua hàng"]).to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        label="📥 Tải hóa đơn chi tiết (.CSV mở chuẩn trên Excel)",
+                        data=csv_bytes,
+                        file_name="hoa_don_winmart.csv",
+                        mime="text/csv"
+                    )
 
-                csv_bytes = df_invoice.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    label="📥 Lưu hóa đơn về máy (.CSV)",
-                    data=csv_bytes,
-                    file_name="hoa_don_winmart.csv",
-                    mime="text/csv"
-                )
-
-            if not_found_items:
-                st.info(
-                    f"ℹ️ **Lưu ý từ WinMart:** Các mặt hàng sau hiện chưa nằm trong chương trình khuyến mãi tuần này "
-                    f"nên chưa được cộng vào hóa đơn: **{', '.join(not_found_items)}**."
-                )
+                if not_found_items:
+                    st.info(
+                        "ℹ️ **Cảnh báo minh bạch (Sản phẩm ngoài danh mục khuyến mãi):** "
+                        f"Các mặt hàng sau hiện không có trong chương trình khuyến mãi tuần này nên hệ thống không tự ý cộng tiền vào hóa đơn: **{', '.join(not_found_items)}**."
+                    )
 
 # ------------------------------------------------------------------------------
-# TAB 2: GỢI Ý GIỎ HÀNG TỐI ƯU THEO NGÂN SÁCH (KNAPSACK)
+# TAB 2: GỢI Ý GIỎ HÀNG TỐI ƯU THEO NGÂN SÁCH (THUẬT TOÁN 0/1 KNAPSACK)
 # ------------------------------------------------------------------------------
 with tab2:
-    st.subheader("🎯 Tự Động Săn Deal Tối Đa Hóa Tiền Tiết Kiệm")
-    st.write("Nhập số tiền bạn dự định chi tiêu, trợ lý thông minh sẽ chọn ra tổ hợp sản phẩm khuyến mãi **hời nhất** trong tầm giá.")
+    st.subheader("Tìm tổ hợp sản phẩm giảm giá sâu nhất trong giới hạn ngân sách")
+    st.caption("Sử dụng thuật toán Quy hoạch động 0/1 Knapsack để tối đa hóa tổng số tiền tiết kiệm mà không vượt quá ngân sách.")
 
-    budget_input = st.number_input(
-        "💵 Ngân sách đi siêu thị của bạn (VNĐ):",
-        min_value=50000,
-        max_value=5000000,
-        value=300000,
-        step=50000
+    budget = st.number_input(
+        "Nhập ngân sách tối đa của bạn (VNĐ):",
+        min_value=0,
+        max_value=20_000_000,
+        value=300_000,
+        step=10_000
     )
 
-    if st.button("🚀 Tìm giỏ hàng tiết kiệm nhất", type="primary"):
-        optimal_items = optimize_basket_knapsack(catalog, int(budget_input), is_win_member)
-        if optimal_items:
-            opt_rows = []
-            sum_orig = 0
-            sum_pay = 0
-            for item in optimal_items:
-                sum_orig += item["original_price"]
-                sum_pay += item["final_price"]
-                opt_rows.append({
-                    "Mã SP": item["id"],
-                    "Sản phẩm đề xuất": item["product_name"],
-                    "Giá niêm yết": f"{item['original_price']:,.0f} đ",
-                    "Giá ưu đãi": f"{item['final_price']:,.0f} đ",
-                    "Tiết kiệm được": f"{item['saving']:,.0f} đ"
-                })
-            st.dataframe(pd.DataFrame(opt_rows), use_container_width=True, hide_index=True)
-            k1, k2, k3 = st.columns(3)
-            k1.metric("💵 Ngân sách tối đa", f"{budget_input:,.0f} VNĐ")
-            k2.metric("🛒 Tổng thanh toán", f"{sum_pay:,.0f} VNĐ", delta=f"Còn dư {budget_input - sum_pay:,.0f} VNĐ")
-            k3.metric("🏆 Tổng tiền tiết kiệm", f"{sum_orig - sum_pay:,.0f} VNĐ", delta=f"Giảm {(sum_orig - sum_pay)/sum_orig*100:.1f}%")
+    if st.button("🎯 Tìm giỏ hàng tiết kiệm nhất", type="primary"):
+        if budget <= 0:
+            st.warning("⚠️ Vui lòng nhập mức ngân sách lớn hơn **0 đ** để hệ thống tìm sản phẩm giúp bạn.")
         else:
-            st.warning("Chưa tìm thấy tổ hợp sản phẩm phù hợp với mức ngân sách này.")
+            best_basket = optimize_basket_knapsack(catalog, budget, is_win_member)
+            if not best_basket:
+                all_prices = [
+                    (item["win_member_price"] if (is_win_member and item["win_member_price"] < item["sale_price"]) else item["sale_price"])
+                    for item in catalog
+                ]
+                min_price = min(all_prices) if all_prices else 0
+                st.info(
+                    f"ℹ️ Với ngân sách **{budget:,.0f} đ**, hiện **không có sản phẩm khuyến mãi nào** phù hợp trong danh mục tuần này. "
+                    f"Sản phẩm ưu đãi có mức giá thấp nhất hiện tại là **{min_price:,.0f} đ** — bạn hãy thử tăng ngân sách lên từ mức này nhé!"
+                )
+            else:
+                df_opt = pd.DataFrame(best_basket)
+                opt_orig = int(df_opt["Giá niêm yết (đ)"].sum())
+                opt_pay = int(df_opt["Giá ưu đãi (đ)"].sum())
+                opt_save = int(df_opt["Tiết kiệm (đ)"].sum())
+                remaining = int(budget - opt_pay)
+
+                st.success(f"✅ Đã tìm thấy tổ hợp tối ưu gồm **{len(df_opt)} sản phẩm** trong ngân sách **{budget:,.0f} đ**!")
+                st.dataframe(
+                    df_opt,
+                    column_config={
+                        "Giá niêm yết (đ)": st.column_config.NumberColumn(format="%d đ"),
+                        "Giá ưu đãi (đ)": st.column_config.NumberColumn(format="%d đ"),
+                        "Tiết kiệm (đ)": st.column_config.NumberColumn(format="%d đ"),
+                        "Link mua hàng": st.column_config.LinkColumn(
+                            "Đặt mua",
+                            help="Bấm để mở trang tìm sản phẩm trên WinMart.vn",
+                            display_text="🛒 Mua ngay"
+                        )
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Tổng thanh toán giỏ hàng", f"{opt_pay:,.0f} đ", delta=f"Dùng {opt_pay/budget*100:.1f}% ngân sách")
+                m2.metric("🎉 Tổng tiền tiết kiệm", f"{opt_save:,.0f} đ")
+                m3.metric("Ngân sách còn dư", f"{remaining:,.0f} đ")
 
 # ------------------------------------------------------------------------------
-# TAB 3: TRA CỨU BẢNG GIÁ KHUYẾN MÃI
+# TAB 3: TRA CỨU BẢNG GIÁ KHUYẾN MÃI TUẦN NÀY
 # ------------------------------------------------------------------------------
 with tab3:
-    st.subheader("🏷️ Danh Mục Sản Phẩm Đang Khuyến Mãi Tại WinMart")
-    search_kw = st.text_input("🔎 Tìm kiếm sản phẩm:", placeholder="Gõ tên sản phẩm hoặc thương hiệu (vd: Ariel, sữa TH, gạo ST25...)")
-    df_cat = pd.DataFrame(catalog)
-    if search_kw.strip():
-        kw_norm = remove_accents(search_kw)
-        df_cat = df_cat[df_cat["product_name"].apply(lambda x: kw_norm in remove_accents(x))]
+    st.subheader("Danh mục toàn bộ sản phẩm khuyến mãi WinMart tuần này")
+    search_kw = st.text_input("🔍 Tìm kiếm nhanh theo tên sản phẩm hoặc thương hiệu:", placeholder="Ví dụ: Ariel, gạo, sữa, dầu ăn...")
 
-    df_display = df_cat[["id", "product_name", "original_price", "sale_price", "win_member_price"]].copy()
-    df_display.columns = ["Mã SP", "Tên sản phẩm", "Giá niêm yết (VNĐ)", "Khuyến mãi tuần (VNĐ)", "Giá Hội viên WiN (VNĐ)"]
-    st.dataframe(df_display, use_container_width=True, hide_index=True, height=430)
+    filtered = catalog
+    if search_kw and search_kw.strip():
+        kw_norm = remove_accents(search_kw)
+        filtered = [item for item in catalog if kw_norm in remove_accents(item["product_name"])]
+
+    if not filtered:
+        st.info("Không tìm thấy sản phẩm nào khớp với từ khóa tìm kiếm.")
+    else:
+        df_cat = pd.DataFrame(filtered).rename(columns={
+            "id": "Mã SKU",
+            "product_name": "Tên sản phẩm",
+            "original_price": "Giá niêm yết (đ)",
+            "sale_price": "Khuyến mãi tuần (đ)",
+            "win_member_price": "Giá Hội viên WiN (đ)"
+        })
+        st.dataframe(
+            df_cat,
+            column_config={
+                "Giá niêm yết (đ)": st.column_config.NumberColumn(format="%d đ"),
+                "Khuyến mãi tuần (đ)": st.column_config.NumberColumn(format="%d đ"),
+                "Giá Hội viên WiN (đ)": st.column_config.NumberColumn(format="%d đ"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
