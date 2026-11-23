@@ -3,7 +3,6 @@ import pandas as pd
 import json
 import os
 import re
-import math
 import urllib.parse
 import unicodedata
 import google.generativeai as genai
@@ -213,6 +212,8 @@ def smart_load_tabular(file_path: str) -> list:
     df = df.dropna(how="all").fillna(0)
     return normalize_records(df.to_dict(orient="records"))
 
-@st.cache_data
 def load_promotions():
-    json_path = os.path.join
+    json_path = os.path.join(BASE_DIR, "promotions.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8")
